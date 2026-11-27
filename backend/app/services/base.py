@@ -3,7 +3,12 @@ from __future__ import annotations
 
 from typing import Any
 
+from app.context import current_context, normalize_receipt
 from app.store import store
+
+
+class WriteRejected(Exception):
+    """写入被拒：请求试图落到演示实例或非当前业务实例上。"""
 
 
 class BaseModuleService:
@@ -15,6 +20,29 @@ class BaseModuleService:
     ACTION_RULES: dict[str, str] = {}
     NEGATIVE_ACTIONS: list[str] = []
 
+    # ------------------------------------------------------------------ 写入守卫
+    def ensure_writable(self) -> None:
+        """只允许写入当前业务实例；同编号的演示实例一律拒收。"""
+        context = current_context()
+        if not context.instance:
+            return
+        if not store.accepts_writes(context.instance):
+            raise WriteRejected(
+                f"请求指向实例 {context.instance}，当前业务实例为 {store.instance_id}，"
+                f"演示实例不能接收写入"
+            )
+
+    def stamp(self, entry: dict[str, Any], action: str | None = None) -> None:
+        """在业务记录上留下最后一次写入的入口与回执，便于回切核验。"""
+        context = current_context()
+        entry["lastActionSite"] = context.label
+        if action:
+            entry["lastAction"] = action
+        if context.receipt:
+            entry["lastActionReceipt"] = normalize_receipt(context.receipt)
+        entry["storeInstance"] = store.instance_id
+
+    # ------------------------------------------------------------------ 查询
     def list_entries(
         self,
         *,
@@ -43,7 +71,9 @@ class BaseModuleService:
     def get_entry(self, entry_id: int) -> dict[str, Any] | None:
         return store.find(self.MODULE, entry_id)
 
+    # ------------------------------------------------------------------ 登记
     def create_entry(self, values: dict[str, Any]) -> tuple[dict[str, Any] | None, list[str]]:
+        self.ensure_writable()
         missing = [
             field for field in self.REQUIRED_FIELDS
             if not str(values.get(field) or "").strip()
@@ -56,10 +86,13 @@ class BaseModuleService:
         entry["status"] = self.STATUS_ORDER[0]
         entry["pending"] = True
         entry["abnormal"] = False
+        self.stamp(entry)
         rows.append(entry)
         return entry, []
 
+    # ------------------------------------------------------------------ 动作
     def run_action(self, entry_id: int, action: str) -> tuple[dict[str, Any] | None, str]:
+        self.ensure_writable()
         entry = store.find(self.MODULE, entry_id)
         if entry is None:
             return None, f"{self.ENTITY} {entry_id} 不存在或已归档"
@@ -69,8 +102,10 @@ class BaseModuleService:
         entry["status"] = target
         entry["pending"] = target != self.STATUS_ORDER[-1]
         entry["abnormal"] = action in self.NEGATIVE_ACTIONS
+        self.stamp(entry, action)
         return entry, f"{self.ENTITY}已{action}"
 
+    # ------------------------------------------------------------------ 统计
     def domain_snapshot(self) -> dict[str, Any]:
         """返回本模块的状态统计与业务对象，供其他模块读取。"""
         rows = store.rows(self.MODULE)

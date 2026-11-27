@@ -15,4 +15,5 @@
     "paths": { "@/*": ["src/*"] }
   },
   "include": ["src/**/*.ts", "src/**/*.d.ts", "src/**/*.vue", "vite.config.ts"]
+  , "exclude": ["src/**/*.spec.ts"]
 }
